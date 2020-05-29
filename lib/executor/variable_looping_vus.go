@@ -614,7 +614,7 @@ func (vlv VariableLoopingVUs) Run(ctx context.Context, out chan<- stats.SampleCo
 	handleNewScheduledVUs := func(newScheduledVUs uint64) {
 		if newScheduledVUs > currentScheduledVUs {
 			for vuNum := currentScheduledVUs; vuNum < newScheduledVUs; vuNum++ {
-				vuHandles[vuNum].start()
+				_ = vuHandles[vuNum].start() // TODO handle error
 				vlv.executionState.ModCurrentlyActiveVUsCount(+1)
 			}
 		} else {
