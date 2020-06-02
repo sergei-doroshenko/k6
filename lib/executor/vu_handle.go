@@ -59,11 +59,11 @@ func newStoppedVUHandle(
 ) *vuHandle {
 	lock := &sync.RWMutex{}
 	ctx, cancel := context.WithCancel(parentCtx)
-	return &vuHandle{
+
+	vh := &vuHandle{
 		mutex:     lock,
 		parentCtx: parentCtx,
 		getVU:     getVU,
-		returnVU:  returnVU,
 		config:    config,
 
 		canStartIter: make(chan struct{}),
@@ -73,16 +73,35 @@ func newStoppedVUHandle(
 		cancel: cancel,
 		logger: logger,
 	}
+
+	vh.returnVU = func(v lib.InitializedVU) {
+		// Don't return the initialized VU back
+		vh.mutex.RLock()
+		select {
+		case <-vh.canStartIter:
+			vh.mutex.RUnlock()
+			// we can continue with itearting - lets not return the vu
+		default:
+			vh.vu = nil
+			atomic.StoreInt32(&vh.change, 1)
+			vh.mutex.RUnlock()
+			returnVU(v)
+		}
+	}
+
+	return vh
 }
 
 func (vh *vuHandle) start() (err error) {
 	vh.mutex.Lock()
 	vh.logger.Debug("Start")
-	vh.vu, err = vh.getVU()
-	if err != nil {
-		return err
+	if vh.vu == nil {
+		vh.vu, err = vh.getVU()
+		if err != nil {
+			return err
+		}
+		atomic.AddInt32(&vh.change, 1)
 	}
-	atomic.AddInt32(&vh.change, 1)
 	close(vh.canStartIter)
 	vh.mutex.Unlock()
 	return nil
