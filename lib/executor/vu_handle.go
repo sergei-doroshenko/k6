@@ -76,16 +76,25 @@ func newStoppedVUHandle(
 
 	vh.returnVU = func(v lib.InitializedVU) {
 		// Don't return the initialized VU back
-		vh.mutex.RLock()
+		vh.mutex.Lock()
 		select {
-		case <-vh.canStartIter:
-			vh.mutex.RUnlock()
-			// we can continue with itearting - lets not return the vu
-		default:
+		case <-vh.parentCtx.Done():
+			// we are done just ruturn the VU
 			vh.vu = nil
 			atomic.StoreInt32(&vh.change, 1)
-			vh.mutex.RUnlock()
+			vh.mutex.Unlock()
 			returnVU(v)
+		default:
+			select {
+			case <-vh.canStartIter:
+				vh.mutex.Unlock()
+				// we can continue with itearting - lets not return the vu
+			default:
+				vh.vu = nil
+				atomic.StoreInt32(&vh.change, 1)
+				vh.mutex.Unlock()
+				returnVU(v)
+			}
 		}
 	}
 
