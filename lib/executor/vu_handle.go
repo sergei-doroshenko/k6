@@ -36,28 +36,29 @@ import (
 //
 // TODO: something simpler?
 type vuHandle struct {
-	mutex     *sync.RWMutex
+	mutex     *sync.Mutex
 	parentCtx context.Context
 	getVU     func() (lib.InitializedVU, error)
 	returnVU  func(lib.InitializedVU)
 	config    *BaseConfig
 
-	vu           lib.InitializedVU
+	initVU       lib.InitializedVU
+	activeVU     lib.ActiveVU
 	canStartIter chan struct{}
 	// This is here only to signal that something has changed it must be added to and read with atomics
 	// and helps to skip checking all the contexts and channels all the time
 	change int32
 
-	ctx    context.Context
-	cancel func()
-	logger *logrus.Entry
+	ctx, vuCtx       context.Context
+	cancel, vuCancel func()
+	logger           *logrus.Entry
 }
 
 func newStoppedVUHandle(
 	parentCtx context.Context, getVU func() (lib.InitializedVU, error),
 	returnVU func(lib.InitializedVU), config *BaseConfig, logger *logrus.Entry,
 ) *vuHandle {
-	lock := &sync.RWMutex{}
+	lock := &sync.Mutex{}
 	ctx, cancel := context.WithCancel(parentCtx)
 
 	vh := &vuHandle{
@@ -80,17 +81,19 @@ func newStoppedVUHandle(
 		select {
 		case <-vh.parentCtx.Done():
 			// we are done just ruturn the VU
-			vh.vu = nil
+			vh.initVU = nil
+			vh.activeVU = nil
 			atomic.StoreInt32(&vh.change, 1)
 			vh.mutex.Unlock()
 			returnVU(v)
 		default:
 			select {
 			case <-vh.canStartIter:
+				vh.activateVU()
 				vh.mutex.Unlock()
 				// we can continue with itearting - lets not return the vu
 			default:
-				vh.vu = nil
+				vh.initVU = nil
 				atomic.StoreInt32(&vh.change, 1)
 				vh.mutex.Unlock()
 				returnVU(v)
@@ -104,16 +107,23 @@ func newStoppedVUHandle(
 func (vh *vuHandle) start() (err error) {
 	vh.mutex.Lock()
 	vh.logger.Debug("Start")
-	if vh.vu == nil {
-		vh.vu, err = vh.getVU()
+	if vh.initVU == nil {
+		vh.initVU, err = vh.getVU()
 		if err != nil {
 			return err
 		}
+		vh.activateVU()
 		atomic.AddInt32(&vh.change, 1)
 	}
 	close(vh.canStartIter)
 	vh.mutex.Unlock()
 	return nil
+}
+
+// this must be called with the mutex locked
+func (vh *vuHandle) activateVU() {
+	vh.vuCtx, vh.vuCancel = context.WithCancel(vh.ctx)
+	vh.activeVU = vh.initVU.Activate(getVUActivationParams(vh.vuCtx, *vh.config, vh.returnVU))
 }
 
 func (vh *vuHandle) gracefulStop() {
@@ -167,9 +177,10 @@ func (vh *vuHandle) runLoopsIfPossible(runIter func(context.Context, lib.ActiveV
 		if cancel != nil {
 			cancel() // signal to return the vu before we continue
 		}
-		vh.mutex.RLock()
+		vh.mutex.Lock()
 		canStartIter, ctx = vh.canStartIter, vh.ctx
-		vh.mutex.RUnlock()
+		cancel = vh.vuCancel
+		vh.mutex.Unlock()
 
 		select {
 		case <-executorDone:
@@ -181,15 +192,12 @@ func (vh *vuHandle) runLoopsIfPossible(runIter func(context.Context, lib.ActiveV
 			select {
 			case <-canStartIter:
 				// reinitialize
-				vh.mutex.RLock()
-				ctx = vh.ctx
-				initVU := vh.vu
+				vh.mutex.Lock()
+				ctx = vh.vuCtx
+				vu = vh.activeVU
+				cancel = vh.vuCancel
 				atomic.StoreInt32(&vh.change, 0) // clear changes here
-				vh.mutex.RUnlock()
-
-				// get a cancel so we can return VU when we get's gracefully stopped
-				ctx, cancel = context.WithCancel(ctx)
-				vu = initVU.Activate(getVUActivationParams(ctx, *vh.config, vh.returnVU))
+				vh.mutex.Unlock()
 			case <-ctx.Done():
 				// hardStop was called, start a fresh iteration to get the new
 				// context and signal channel
