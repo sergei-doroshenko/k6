@@ -144,6 +144,8 @@ func (vh *vuHandle) hardStop() {
 	vh.logger.Debug("Hard stop")
 	vh.cancel() // cancel the previous context
 	atomic.AddInt32(&vh.change, 1)
+	vh.initVU = nil
+	vh.activeVU = nil
 	vh.ctx, vh.cancel = context.WithCancel(vh.parentCtx) // create a new context
 	select {
 	case <-vh.canStartIter:
@@ -193,10 +195,17 @@ func (vh *vuHandle) runLoopsIfPossible(runIter func(context.Context, lib.ActiveV
 			case <-canStartIter:
 				// reinitialize
 				vh.mutex.Lock()
-				ctx = vh.vuCtx
-				vu = vh.activeVU
-				cancel = vh.vuCancel
-				atomic.StoreInt32(&vh.change, 0) // clear changes here
+				select {
+				case <-canStartIter:
+					vu = vh.activeVU
+					if vu != nil { // we've raced with the ReturnVU so let's just make another loop
+						ctx = vh.vuCtx
+						cancel = vh.vuCancel
+						atomic.StoreInt32(&vh.change, 0) // clear changes here
+					} // TODO call runtime.GoSched() in the else?
+				default:
+					// well we got raced to here by something
+				}
 				vh.mutex.Unlock()
 			case <-ctx.Done():
 				// hardStop was called, start a fresh iteration to get the new
